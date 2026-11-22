@@ -16,8 +16,9 @@ internal fun enqueueSongs(
         additions.map { song ->
             if (playNext && song.queueSourceTitle.isRecommendationGeneratedQueueSource()) {
                 song.copy(queueSourceTitle = QUEUE_SOURCE_ADDED_MANUALLY)
-            } else if (!playNext && !song.queueSourceTitle.isRecommendationGeneratedQueueSource()) {
-                song.copy(queueSourceTitle = song.queueSourceTitle ?: QUEUE_SOURCE_ADDED_MANUALLY)
+            } else if (!playNext) {
+                // Forza l'etichetta MANUALE su tutto ciò che aggiungi in coda
+                song.copy(queueSourceTitle = QUEUE_SOURCE_ADDED_MANUALLY)
             } else {
                 song
             }
@@ -25,16 +26,16 @@ internal fun enqueueSongs(
     if (playNext) {
         queue.playNext(prepared, preventDuplicates)
     } else {
-        val (recommended, manual) = prepared.partition { it.queueSourceTitle.isRecommendationGeneratedQueueSource() }
         if (preventDuplicates) queue.removeSongs(prepared.mapTo(mutableSetOf()) { it.id }, keepCurrent = true)
+        
+        // Cerca il primo brano dopo quello attuale che NON è stato aggiunto manualmente
+        // (quindi si ferma subito prima del prossimo brano dell'artista/album/playlist)
         val insertIndex =
             queue.items.value.indices.firstOrNull {
                 it > queue.currentIndex.value &&
-                    queue.items.value[it]
-                        .queueSourceTitle
-                        .isRecommendationGeneratedQueueSource()
+                    queue.items.value[it].queueSourceTitle != QUEUE_SOURCE_ADDED_MANUALLY
             }
-        queue.addToQueue(manual, preventDuplicates, insertIndex)
-        queue.addToQueue(recommended, preventDuplicates)
+            
+        queue.addToQueue(prepared, preventDuplicates, insertIndex)
     }
 }
