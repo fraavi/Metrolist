@@ -1,17 +1,25 @@
 name: Build Android
 
 on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '.github/**'
+      - '**.md'
   workflow_dispatch:
     inputs:
       variant:
         description: APK variant to build and upload as an artifact
         type: choice
-        options: [release, debug]
-        default: release
+        options: [izzy, release, debug]
+        default: izzy
+
+permissions:
+  contents: write
 
 concurrency:
-  # Dispatched APK builds get their own group so pushes to main cannot cancel them.
-  group: android-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.event.pull_request.number || github.ref }}
+  group: android-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -21,10 +29,10 @@ jobs:
     permissions:
       contents: read
     with:
-      variant: ${{ inputs.variant || 'debug' }}
-      upload-artifact: ${{ github.event_name == 'workflow_dispatch' }}
-      require-signing: ${{ inputs.variant == 'release' }}
-      cache-read-only: ${{ github.event_name == 'pull_request' }}
+      variant: ${{ inputs.variant || 'izzy' }}
+      upload-artifact: true
+      require-signing: true
+      cache-read-only: false
     secrets:
       KEYSTORE_PATH: ${{ secrets.KEYSTORE_PATH || secrets.KEYSTORE }}
       KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -35,3 +43,32 @@ jobs:
       GRADLE_ENCRYPTION_KEY: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
       LYPRIO_BASE_URL: ${{ secrets.LYPRIO_BASE_URL }}
       LYPRIO_HMAC_KEY: ${{ secrets.LYPRIO_HMAC_KEY }}
+
+  publish-release:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Scarica APK compilato
+        uses: actions/download-artifact@v4
+        with:
+          name: android-build
+          path: artifacts
+
+      - name: Prepara APK con nome compatibile con AppUpdateManager
+        run: |
+          mkdir -p release_assets
+          APK_FILE=$(find artifacts -name "*.apk" | head -n 1)
+          echo "Trovato APK: $APK_FILE"
+          cp "$APK_FILE" release_assets/Metrolist-Android-release.apk
+
+      - name: Pubblica Release Nightly su GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly
+          name: Nightly Build
+          prerelease: true
+          make_latest: false
+          files: release_assets/Metrolist-Android-release.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
