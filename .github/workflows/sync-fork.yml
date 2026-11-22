@@ -1,0 +1,25 @@
+name: Sync Fork
+
+on:
+  schedule:
+    - cron: '0 */12 * * *' # Controlla ogni 12 ore
+  workflow_dispatch: # Permette anche l'avvio manuale
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Sync with upstream
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/MetrolistGroup/Metrolist.git
+          git fetch upstream
+          git merge upstream/main --no-edit
+          git push origin main
