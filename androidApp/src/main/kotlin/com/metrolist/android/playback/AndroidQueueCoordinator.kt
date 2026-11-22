@@ -730,7 +730,7 @@ internal class AndroidQueueCoordinator(
 
         transitions.cancelNextTrackPreload()
         generatedIndices.asReversed().forEach(player::removeQueueItem)
-        player.addToQueue(additions)
+        player.appendPlaylistSongs(additions)
         recommendationHistory.remember(additions)
         queuedSongIds.clear()
         queuedSongIds.addAll(player.songQueue.value.map(SongItem::id))
@@ -988,7 +988,7 @@ internal class AndroidQueueCoordinator(
             }
 
         transitions.cancelNextTrackPreload()
-        player.addToQueue(toQueue + toSuggest)
+        player.appendPlaylistSongs(toQueue + toSuggest)
         recommendationHistory.remember(rawAdditions)
         queuedSongIds.clear()
         queuedSongIds.addAll(player.songQueue.value.map(SongItem::id))

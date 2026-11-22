@@ -33,6 +33,7 @@ import com.metrolist.shared.playback.MusicQueueState
 import com.metrolist.shared.playback.PlaybackSeekSource
 import com.metrolist.shared.playback.PlayerSession
 import com.metrolist.shared.playback.QUEUE_SOURCE_ADDED_MANUALLY
+import com.metrolist.shared.playback.QUEUE_SOURCE_USER_ENQUEUED
 import com.metrolist.shared.playback.QueueRemoval
 import com.metrolist.shared.playback.SleepTimerState
 import com.metrolist.shared.playback.isRecommendationGeneratedQueueSource
@@ -1248,21 +1249,23 @@ class PlayerConnection(
         val state = player.queueState.value
         val index = queueEntryIndex(state, entryKey) ?: return
         val song = state.entries[index].song
-        val isSuggested = song.queueSourceTitle.isRecommendedQueueSource() && index > state.currentIndex
+        val isSuggested = song.queueSourceTitle.isRecommendationGeneratedQueueSource() && index > state.currentIndex
         if (isSuggested) {
-            val firstSuggestedIndex =
-                state.entries.indices.firstOrNull {
-                    it > state.currentIndex &&
-                        state.entries[it]
-                            .song.queueSourceTitle
-                            .isRecommendedQueueSource()
-                } ?: state.entries.size
-            val targetIndex = firstSuggestedIndex.coerceAtMost(state.entries.lastIndex)
-            moveQueueEntry(
-                entryKey,
-                state.entries[targetIndex].key,
-                song.copy(queueSourceTitle = QUEUE_SOURCE_ADDED_MANUALLY),
-            )
+            var insertPos = state.currentIndex + 1
+            while (insertPos < state.entries.size &&
+                state.entries[insertPos].song.queueSourceTitle == QUEUE_SOURCE_USER_ENQUEUED) {
+                insertPos++
+            }
+            val targetIndex = insertPos.coerceAtMost(state.entries.lastIndex)
+            if (targetIndex == index) {
+                moveQueueEntry(entryKey, entryKey, song.copy(queueSourceTitle = QUEUE_SOURCE_USER_ENQUEUED))
+            } else {
+                moveQueueEntry(
+                    entryKey,
+                    state.entries[targetIndex].key,
+                    song.copy(queueSourceTitle = QUEUE_SOURCE_USER_ENQUEUED),
+                )
+            }
         } else {
             addToQueue(song)
         }
@@ -1310,7 +1313,7 @@ class PlayerConnection(
             val recommendationIds =
                 state.entries
                     .drop(state.currentIndex + 1)
-                    .filter { it.song.queueSourceTitle.isRecommendedQueueSource() }
+                    .filter { it.song.queueSourceTitle.isRecommendationGeneratedQueueSource() }
                     .mapTo(mutableSetOf()) { it.song.id }
             if (preparedSongs.none { it.id in recommendationIds }) {
                 service.addToQueue(preparedSongs, playNext)
@@ -1323,7 +1326,7 @@ class PlayerConnection(
                         .withIndex()
                         .firstOrNull { (index, entry) ->
                             index > state.currentIndex && entry.song.id == song.id &&
-                                entry.song.queueSourceTitle.isRecommendedQueueSource()
+                                entry.song.queueSourceTitle.isRecommendationGeneratedQueueSource()
                         }?.value
                 if (existingEntry != null) {
                     if (playNext) playNextQueueEntry(existingEntry.key) else addQueueEntry(existingEntry.key)
