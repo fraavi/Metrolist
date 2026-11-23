@@ -1168,6 +1168,7 @@ class ExoPlaybackPlayer(
         source: PlaybackSeekSource,
     ) {
         if (currentSong.value?.isLive == true) return
+        onPlaybackCommand()
         if (nextStarted) cancelNextInternal()
         val target = position.coerceAtLeast(0L)
         recordSeek(exo, target, source)
@@ -3325,6 +3326,7 @@ class ExoPlaybackPlayer(
             offloadFailed = true
             updateOffloadPreferences(exo)
             nextPlayer?.let { updateOffloadPreferences(it) }
+            progressWatchdog.rearm(now)
             recordPlaybackState(
                 "Android audio offload disabled after playback stalled.",
                 mapOf("progressStalledMs" to playbackProgressStalledMs.toString()),

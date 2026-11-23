@@ -166,6 +166,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.guava.future
 import kotlinx.coroutines.isActive
@@ -296,8 +297,9 @@ class MusicService :
     var media3Player: Player? = null
         private set
     private var mediaSession: MediaLibrarySession? = null
-    internal var playbackCommandGeneration = 0L
-        private set
+    private val playbackCommandEvents = MutableStateFlow(0L)
+    internal val playbackCommands = playbackCommandEvents.asStateFlow()
+    internal val playbackCommandGeneration: Long get() = playbackCommandEvents.value
     private lateinit var playbackRestoreJob: Job
     private lateinit var automotiveLibrary: AutomotiveMediaLibrary
     private val automotiveRootChildrenLimit = ConcurrentHashMap<MediaSession.ControllerInfo, Int>()
@@ -375,6 +377,9 @@ class MusicService :
     private val healthyQueueRequestIds = linkedSetOf<Long>()
 
     private var lastPersistenceState: PersistPlayerState? = null
+
+    // The service-owned channel can be cancelled before its clear write runs; keep the request for the final checkpoint.
+    @Volatile private var pendingPlaybackClear: PlaybackPersistenceWriter.Request? = null
     private val playbackPersistenceRequests = Channel<PlaybackPersistenceWriter.Request>(Channel.CONFLATED)
 
     private val playbackPersistenceLifecycle = PlaybackPersistenceLifecycle()
@@ -520,6 +525,7 @@ class MusicService :
                 onRemoteSeek = ::seekCastTo,
                 onRemoteVolumeChange = ::setCastVolume,
                 onQueueChanged = ::synchronizeMediaSessionQueue,
+                onQueueCleared = ::clearPersistedPlaybackState,
                 extendPlaylistBeforeSkip = ::extendPlaylistBeforeSkip,
                 mediaItemResolver = automotiveLibrary::resolveCachedSong,
                 automotivePlaybackRequestGate = automotivePlaybackRequestGate,
@@ -544,6 +550,7 @@ class MusicService :
                 fetchPlaybackResource = { song, wantVideo -> fetchPlaybackResource(song, wantVideo).resource },
                 isCasting = { castManager.state.value.status != CastConnectionStatus.DISCONNECTED },
                 onSave = ::savePlaybackState,
+                onQueueCleared = ::clearPersistedPlaybackState,
                 onDiscordUpdate = ::syncDiscordState,
             )
         sleepTimerController =
@@ -726,7 +733,7 @@ class MusicService :
     }
 
     internal fun onPlaybackCommand() {
-        playbackCommandGeneration++
+        playbackCommandEvents.update { it + 1 }
         playbackBenchmark.cancel()
         pauseOnMute.cancelResume()
     }
@@ -2662,17 +2669,54 @@ class MusicService :
 
     private fun savePlaybackState() {
         if (!playbackPersistenceLifecycle.restoring) queueCoordinator.saveShuffleMode()
-        if (!playbackPersistenceLifecycle.canSave(Settings.shared.persistentQueue)) return
-        val state = buildPersistPlayerState()
-        if (!shouldPersistPlaybackState(lastPersistenceState, state)) return
-        lastPersistenceState = state
-        playbackPersistenceRequests.trySend(playbackPersistenceWriter.request(state))
+        val decision =
+            decidePlaybackCheckpoint(
+                writer = playbackPersistenceWriter,
+                lifecycle = playbackPersistenceLifecycle,
+                persistentQueue = Settings.shared.persistentQueue,
+                previous = lastPersistenceState,
+                state = ::buildPersistPlayerState,
+            )
+        val request = decision.request ?: return
+        pendingPlaybackClear = request.takeIf { it.clear }
+        lastPersistenceState = decision.state
+        playbackPersistenceRequests.trySend(request)
     }
 
     private fun saveFinalPlaybackState(): Job? {
         if (!playbackPersistenceLifecycle.restoring) queueCoordinator.saveShuffleMode()
         if (!playbackPersistenceLifecycle.canSave(Settings.shared.persistentQueue)) return finalPlaybackPersistence
-        val request = playbackPersistenceWriter.request(buildPersistPlayerState())
+        if (!Settings.shared.persistentQueue) return clearFinalPersistedPlaybackState()
+        val state = buildPersistPlayerState()
+        if (state == null) {
+            val clear = pendingPlaybackClear
+            if (clear != null) {
+                pendingPlaybackClear = null
+                return launchFinalPersistence(clear)
+            }
+            // A transient empty queue can still have a queued non-empty checkpoint; flush it before the scope is cancelled.
+            val pendingState = lastPersistenceState ?: return finalPlaybackPersistence
+            return launchFinalPersistence(playbackPersistenceWriter.request(pendingState))
+        }
+        pendingPlaybackClear = null
+        lastPersistenceState = state
+        return launchFinalPersistence(playbackPersistenceWriter.request(state))
+    }
+
+    internal fun clearPersistedPlaybackState() {
+        lastPersistenceState = null
+        val clear = playbackPersistenceWriter.requestClear()
+        pendingPlaybackClear = clear
+        playbackPersistenceRequests.trySend(clear)
+    }
+
+    private fun clearFinalPersistedPlaybackState(): Job? {
+        lastPersistenceState = null
+        pendingPlaybackClear = null
+        return launchFinalPersistence(playbackPersistenceWriter.requestClear())
+    }
+
+    private fun launchFinalPersistence(request: PlaybackPersistenceWriter.Request): Job? {
         finalPlaybackPersistence =
             CoroutineScope(Dispatchers.IO).launch {
                 runCatching { playbackPersistenceWriter.write(request) }
@@ -2707,6 +2751,7 @@ class MusicService :
             val restoredSongs = restoredQueue.displayedItems
             if (restoredSongs.isEmpty()) {
                 Settings.shared.pendingContinuePlayback = false
+                clearPersistedPlaybackState()
                 return
             }
             val restored = queueCoordinator.restorePersistedQueue(state, restoredQueue, expectedQueueSessionId, restoreModes)
@@ -2719,6 +2764,7 @@ class MusicService :
         } catch (e: Exception) {
             Timber.e(e, "Failed to restore playback")
             Settings.shared.pendingContinuePlayback = false
+            clearPersistedPlaybackState()
         }
     }
 
@@ -3667,6 +3713,7 @@ class MusicService :
                 activityName = settings.discordActivityName,
                 stateTemplate = settings.discordStateTemplate,
                 detailsTemplate = settings.discordDetailsTemplate,
+                albumTemplate = settings.discordAlbumTemplate,
                 btn1Enabled = settings.discordButton1Enabled,
                 btn1Label =
                     resolveDiscordButtonLabel(

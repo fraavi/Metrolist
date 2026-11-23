@@ -192,6 +192,7 @@ data class SongWatchInformation(
     val subscriberCount: String? = null,
     val likeCount: Long? = null,
     val viewCount: Long? = null,
+    val uploadDate: String? = null,
     val description: String? = null,
 )
 
@@ -958,6 +959,12 @@ class YouTubeRepository(
         applyContentFilters: Boolean = true,
     ): PlaylistPage {
         if (!initial.hasMore) return initial.also { rememberPlaylistMembership(it, applyContentFilters) }
+        // Mix continuations keep generating songs and never end, so the loaded pages are the whole mix.
+        val header = initial.sections["header"]?.filterIsInstance<PlaylistItem>()?.firstOrNull()
+        if (header?.id?.isMixPlaylistId() == true) {
+            requireCurrentSession(initial.session)
+            return initial.copy(pending = emptyList())
+        }
         val sections = linkedMapOf<String, MutableList<YTItem>>()
         var last = initial
         playlistPages(initial, applyContentFilters).collect { page ->
@@ -1767,6 +1774,15 @@ class YouTubeRepository(
                     ?.get("videoOwnerRenderer")
                     .asObject()
             val likeEntity = response.findFirstObject("likeCountEntity")
+            // WEB now sends an unset likeCountEntity; the exact count is only in the like button's accessibility text.
+            val likeButton =
+                response
+                    .findFirstObject("segmentedLikeDislikeButtonViewModel")
+                    ?.get("likeButtonViewModel")
+                    .asObject()
+                    ?.findFirstObject("defaultButtonViewModel")
+                    ?.get("buttonViewModel")
+                    .asObject()
             val viewEntity = response.findFirstObject("viewCountEntity")
 
             SongWatchInformation(
@@ -1786,10 +1802,17 @@ class YouTubeRepository(
                     likeEntity?.longValue("likeCountIfIndifferentNumber")
                         ?: likeEntity?.longValue("likeCountIfLikedNumber")
                         ?: likeEntity?.get("expandedLikeCountIfIndifferent").textContent().parseIntegerCount()
-                        ?: likeEntity?.get("expandedLikeCountIfLiked").textContent().parseIntegerCount(),
+                        ?: likeEntity?.get("expandedLikeCountIfLiked").textContent().parseIntegerCount()
+                        ?: likeButton?.get("accessibilityText").primitiveText().parseIntegerCount(),
                 viewCount =
                     viewEntity?.longValue("viewCountNumber")
                         ?: viewEntity?.get("unlabeledViewCountValue").textContent().parseIntegerCount(),
+                uploadDate =
+                    response
+                        .findFirstObject("videoPrimaryInfoRenderer")
+                        ?.get("dateText")
+                        .textContent()
+                        ?.takeIf { it.isNotBlank() },
                 description =
                     secondaryInfo
                         ?.get("attributedDescription")
